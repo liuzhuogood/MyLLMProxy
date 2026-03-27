@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -27,6 +28,24 @@ HOP_BY_HOP_HEADERS = {
 }
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 LOGGER = logging.getLogger("my_llm_proxy")
+
+
+def setup_logger() -> None:
+    # reload 模式下真正处理请求的是 uvicorn 子进程，这里要在应用侧保证日志能落到控制台。
+    if LOGGER.handlers:
+        return
+
+    log_level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s"))
+
+    LOGGER.addHandler(handler)
+    LOGGER.setLevel(log_level)
+    LOGGER.propagate = False
+
+
+setup_logger()
 
 
 class UpstreamRetryableError(Exception):
