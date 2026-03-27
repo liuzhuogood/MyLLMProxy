@@ -69,6 +69,7 @@ class OpenAIProxyService:
                 detail="field `messages` is required and must be a list",
             )
 
+        self._get_route(model_alias)
         stream = bool(payload.get("stream", False))
         try:
             candidates = self._model_router.route_candidates(model_alias)
@@ -103,6 +104,36 @@ class OpenAIProxyService:
                 }
             },
         )
+
+    def validate_route_api_key(self, request: Request, payload: dict[str, Any]) -> None:
+        model_alias = payload.get("model")
+        if not isinstance(model_alias, str) or not model_alias:
+            return
+
+        route = self._get_route(model_alias)
+        expected_key = route.api_key or self._config.gateway.api_key
+        if not expected_key:
+            return
+
+        # 兼容 `Authorization: Bearer xxx`，也兼容直接传 `Authorization: xxx`。
+        header = request.headers.get("authorization", "")
+        scheme, _, token = header.partition(" ")
+        received_key = token if scheme.lower() == "bearer" and token else header.strip()
+        if received_key != expected_key:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="invalid route api key",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    def _get_route(self, model_alias: str):
+        try:
+            return self._model_router.get_route(model_alias)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"model {model_alias!r} is not configured",
+            ) from exc
 
     async def _dispatch_chat_completion(
         self,
@@ -216,7 +247,7 @@ class OpenAIProxyService:
             yield b"data: [DONE]\n\n"
 
     def validate_gateway_api_key(self, request: Request) -> None:
-        expected_key = self._config.gateway.resolved_api_key()
+        expected_key = self._config.gateway.api_key
         if not expected_key:
             return
 
@@ -235,7 +266,7 @@ class OpenAIProxyService:
             "content-type": "application/json",
             **target.provider.headers,
         }
-        api_key = target.provider.resolved_api_key()
+        api_key = target.provider.api_key
         if api_key:
             headers["authorization"] = f"Bearer {api_key}"
         return headers

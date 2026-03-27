@@ -24,11 +24,14 @@ class ModelRouter:
     def list_models(self) -> list[str]:
         return sorted(self._config.routes.keys())
 
-    def route_candidates(self, model_alias: str) -> list[ResolvedTarget]:
+    def get_route(self, model_alias: str) -> RouteConfig:
         route = self._config.routes.get(model_alias)
         if route is None:
             raise KeyError(model_alias)
+        return route
 
+    def route_candidates(self, model_alias: str) -> list[ResolvedTarget]:
+        route = self.get_route(model_alias)
         # 这里返回的是“尝试顺序”，前面的优先请求，失败后再回退到后面的节点。
         ordered_targets = self._order_targets(model_alias, route)
         return [

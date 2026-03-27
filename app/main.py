@@ -44,7 +44,6 @@ def create_app(
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         proxy_service: OpenAIProxyService = request.app.state.proxy_service
-        proxy_service.validate_gateway_api_key(request)
         # 这里只做最小校验，剩下的字段尽量原样透传给上游。
         try:
             payload = await request.json()
@@ -58,6 +57,7 @@ def create_app(
                 status_code=400,
                 content={"error": {"message": "request body must be a JSON object"}},
             )
+        proxy_service.validate_route_api_key(request, payload)
         return await proxy_service.proxy_chat_completions(payload)
 
     return app

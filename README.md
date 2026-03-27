@@ -34,19 +34,20 @@ export MY_LLM_PROXY_CONFIG=/your/path/providers.yaml
 gateway:
   strategy: round_robin
   timeout_seconds: 90
-  # api_key_env: MY_LLM_PROXY_GATEWAY_KEY
+  # api_key: sk-gateway
 
 providers:
   - name: openai-primary
     base_url: https://api.openai.com
-    api_key_env: OPENAI_API_KEY
+    api_key: sk-provider-1
 
   - name: openai-backup
     base_url: https://api.openai.com
-    api_key_env: OPENAI_API_KEY_BACKUP
+    api_key: sk-provider-2
 
 routes:
   gpt-4o-mini:
+    api_key: sk-demo
     strategy: round_robin
     targets:
       - provider: openai-primary
@@ -58,8 +59,10 @@ routes:
 这里的意思是：
 
 - 对外暴露模型名 `gpt-4o-mini`
+- 客户端调用这个模型时，要带 `Authorization: Bearer sk-demo`
 - 实际会轮询打到 `openai-primary` 和 `openai-backup`
 - 请求体里的 `model` 会被改成对应上游的 `upstream_model`
+- 转发到上游时，会自动带上 provider 自己的 `api_key`
 
 ## 运行
 
@@ -69,27 +72,21 @@ routes:
 pip install -e ".[dev]"
 ```
 
-再设置上游 key：
-
-```bash
-export OPENAI_API_KEY=xxx
-export OPENAI_API_KEY_BACKUP=yyy
-```
-
 启动服务：
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+uvicorn app.main:app --host 0.0.0.0 --port 4000 --reload
 ```
 
 ## 调用示例
 
 ```bash
-curl http://127.0.0.1:8000/v1/models
+curl http://127.0.0.1:4000/v1/models
 ```
 
 ```bash
-curl http://127.0.0.1:8000/v1/chat/completions \
+curl http://127.0.0.1:4000/v1/chat/completions \
+  -H "Authorization: Bearer sk-demo" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o-mini",

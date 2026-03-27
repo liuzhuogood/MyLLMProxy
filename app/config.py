@@ -14,14 +14,6 @@ class GatewayConfig(BaseModel):
     strategy: str = "round_robin"
     timeout_seconds: float = 90.0
     api_key: str | None = None
-    api_key_env: str | None = None
-
-    def resolved_api_key(self) -> str | None:
-        if self.api_key:
-            return self.api_key
-        if self.api_key_env:
-            return os.getenv(self.api_key_env)
-        return None
 
 
 class ProviderConfig(BaseModel):
@@ -30,17 +22,9 @@ class ProviderConfig(BaseModel):
     name: str
     base_url: str
     api_key: str | None = None
-    api_key_env: str | None = None
     chat_path: str = "/v1/chat/completions"
     models_path: str = "/v1/models"
     headers: dict[str, str] = Field(default_factory=dict)
-
-    def resolved_api_key(self) -> str | None:
-        if self.api_key:
-            return self.api_key
-        if self.api_key_env:
-            return os.getenv(self.api_key_env)
-        return None
 
 
 class TargetConfig(BaseModel):
@@ -60,6 +44,7 @@ class TargetConfig(BaseModel):
 class RouteConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    api_key: str | None = None
     strategy: str | None = None
     targets: list[TargetConfig]
 

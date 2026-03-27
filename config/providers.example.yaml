@@ -1,21 +1,22 @@
 gateway:
   strategy: round_robin
   timeout_seconds: 90
-  # api_key_env: MY_LLM_PROXY_GATEWAY_KEY
+  # api_key: sk-gateway
 
 providers:
   - name: openai-primary
     base_url: https://api.openai.com
-    api_key_env: OPENAI_API_KEY
+    api_key: sk-provider-1
     chat_path: /v1/chat/completions
 
   - name: openai-backup
     base_url: https://api.openai.com
-    api_key_env: OPENAI_API_KEY_BACKUP
+    api_key: sk-provider-2
     chat_path: /v1/chat/completions
 
 routes:
   gpt-4o-mini:
+    api_key: sk-demo
     strategy: round_robin
     targets:
       - provider: openai-primary
@@ -24,6 +25,7 @@ routes:
         upstream_model: gpt-4o-mini
 
   gpt-4.1-mini:
+    api_key: sk-demo
     targets:
       - provider: openai-primary
         upstream_model: gpt-4.1-mini
