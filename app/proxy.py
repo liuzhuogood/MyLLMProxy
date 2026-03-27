@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from typing import Any
 
 import httpx
@@ -22,6 +24,7 @@ HOP_BY_HOP_HEADERS = {
     "upgrade",
 }
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+LOGGER = logging.getLogger("my_llm_proxy")
 
 
 class UpstreamRetryableError(Exception):
@@ -71,6 +74,12 @@ class OpenAIProxyService:
 
         self._get_route(model_alias)
         stream = bool(payload.get("stream", False))
+        LOGGER.info(
+            "收到客户端请求 model=%s stream=%s body=%s",
+            model_alias,
+            stream,
+            self._dump_json(payload),
+        )
         try:
             candidates = self._model_router.route_candidates(model_alias)
         except KeyError as exc:
@@ -120,6 +129,7 @@ class OpenAIProxyService:
         scheme, _, token = header.partition(" ")
         received_key = token if scheme.lower() == "bearer" and token else header.strip()
         if received_key != expected_key:
+            LOGGER.warning("路由鉴权失败 model=%s", model_alias)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid route api key",
@@ -145,6 +155,16 @@ class OpenAIProxyService:
         headers = self._build_upstream_headers(target)
         url = self._join_url(target.provider.base_url, target.provider.chat_path)
         timeout = self._config.gateway.timeout_seconds
+        started_at = time.perf_counter()
+        LOGGER.info(
+            "开始转发 model=%s provider=%s upstream_model=%s url=%s headers=%s body=%s",
+            response_model_alias,
+            target.provider.name,
+            target.upstream_model,
+            url,
+            self._sanitize_log_headers(headers),
+            self._dump_json(payload),
+        )
 
         if stream:
             try:
@@ -157,17 +177,37 @@ class OpenAIProxyService:
                 )
                 upstream_response = await self._http_client.send(upstream_request, stream=True)
             except httpx.HTTPError as exc:
+                LOGGER.warning("上游请求异常 provider=%s error=%s", target.provider.name, exc)
                 raise UpstreamRetryableError(str(exc)) from exc
             if upstream_response.status_code in RETRYABLE_STATUS_CODES:
                 body = await upstream_response.aread()
                 await upstream_response.aclose()
+                LOGGER.warning(
+                    "上游可重试失败 provider=%s status=%s elapsed_ms=%s body=%s",
+                    target.provider.name,
+                    upstream_response.status_code,
+                    self._elapsed_ms(started_at),
+                    self._truncate_text(body.decode("utf-8", "ignore")),
+                )
                 raise UpstreamRetryableError(
                     f"retryable status {upstream_response.status_code}: {body.decode('utf-8', 'ignore')}"
                 )
             if upstream_response.status_code >= 400:
+                LOGGER.warning(
+                    "上游返回错误 provider=%s status=%s elapsed_ms=%s",
+                    target.provider.name,
+                    upstream_response.status_code,
+                    self._elapsed_ms(started_at),
+                )
                 return await self._build_error_response(upstream_response)
             response_headers = self._sanitize_response_headers(upstream_response.headers)
             media_type = upstream_response.headers.get("content-type", "text/event-stream")
+            LOGGER.info(
+                "上游流式响应 provider=%s status=%s elapsed_ms=%s",
+                target.provider.name,
+                upstream_response.status_code,
+                self._elapsed_ms(started_at),
+            )
             return StreamingResponse(
                 # 流式模式不改写内容，直接把 SSE 数据往下游转发。
                 self._stream_upstream(upstream_response),
@@ -185,13 +225,28 @@ class OpenAIProxyService:
                 timeout=timeout,
             )
         except httpx.HTTPError as exc:
+            LOGGER.warning("上游请求异常 provider=%s error=%s", target.provider.name, exc)
             raise UpstreamRetryableError(str(exc)) from exc
 
         if upstream_response.status_code in RETRYABLE_STATUS_CODES:
+            LOGGER.warning(
+                "上游可重试失败 provider=%s status=%s elapsed_ms=%s body=%s",
+                target.provider.name,
+                upstream_response.status_code,
+                self._elapsed_ms(started_at),
+                self._truncate_text(upstream_response.text),
+            )
             raise UpstreamRetryableError(
                 f"retryable status {upstream_response.status_code}: {upstream_response.text}"
             )
         if upstream_response.status_code >= 400:
+            LOGGER.warning(
+                "上游返回错误 provider=%s status=%s elapsed_ms=%s body=%s",
+                target.provider.name,
+                upstream_response.status_code,
+                self._elapsed_ms(started_at),
+                self._truncate_text(upstream_response.text),
+            )
             return await self._build_error_response(upstream_response)
 
         response_headers = self._sanitize_response_headers(upstream_response.headers)
@@ -208,6 +263,13 @@ class OpenAIProxyService:
         if isinstance(data, dict) and "model" in data:
             # 对客户端保持模型别名一致，隐藏真实上游模型名。
             data["model"] = response_model_alias
+        LOGGER.info(
+            "转发完成 provider=%s status=%s elapsed_ms=%s body=%s",
+            target.provider.name,
+            upstream_response.status_code,
+            self._elapsed_ms(started_at),
+            self._dump_json(data),
+        )
         return JSONResponse(
             content=data,
             status_code=upstream_response.status_code,
@@ -255,6 +317,7 @@ class OpenAIProxyService:
         header = request.headers.get("authorization", "")
         scheme, _, token = header.partition(" ")
         if scheme.lower() != "bearer" or token != expected_key:
+            LOGGER.warning("网关鉴权失败 path=%s", request.url.path)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="invalid gateway api key",
@@ -283,3 +346,29 @@ class OpenAIProxyService:
                 continue
             sanitized[key] = value
         return sanitized
+
+    @staticmethod
+    def _sanitize_log_headers(headers: dict[str, str]) -> dict[str, str]:
+        sanitized = dict(headers)
+        if "authorization" in sanitized:
+            sanitized["authorization"] = "***"
+        if "Authorization" in sanitized:
+            sanitized["Authorization"] = "***"
+        return sanitized
+
+    @staticmethod
+    def _truncate_text(text: str, limit: int = 1500) -> str:
+        if len(text) <= limit:
+            return text
+        return f"{text[:limit]}...(truncated)"
+
+    @classmethod
+    def _dump_json(cls, data: Any) -> str:
+        try:
+            return cls._truncate_text(json.dumps(data, ensure_ascii=False))
+        except TypeError:
+            return cls._truncate_text(str(data))
+
+    @staticmethod
+    def _elapsed_ms(started_at: float) -> int:
+        return int((time.perf_counter() - started_at) * 1000)

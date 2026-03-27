@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 
 import uvicorn
@@ -10,12 +11,19 @@ def main() -> None:
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "4000"))
     reload = os.getenv("RELOAD", "true").lower() in {"1", "true", "yes", "on"}
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    )
 
     uvicorn.run(
         "app.main:app",
         host=host,
         port=port,
         reload=reload,
+        log_level=log_level.lower(),
     )
 
 
