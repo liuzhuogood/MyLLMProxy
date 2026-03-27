@@ -10,12 +10,16 @@
 
 - `GET /v1/models`
 - `POST /v1/chat/completions`
+- `POST /v1/messages`（Anthropic 兼容）
+- `POST /v1/messages/count_tokens`（Anthropic 兼容）
+- `GET /anthropic/v1/models` / `POST /anthropic/v1/messages`（Anthropic 命名空间别名）
 
 ## 为什么这样拆
 
 - `app/config.py`：读取 YAML 配置
 - `app/routing.py`：决定某个模型别名该打到哪个上游
 - `app/proxy.py`：负责鉴权、转发请求、处理失败回退
+- `app/anthropic.py`：负责 Anthropic 和 OpenAI 请求/响应格式互转
 - `app/main.py`：FastAPI 入口
 
 代码故意保持简单，没有做太多抽象，方便你后面继续改。
@@ -95,6 +99,46 @@ curl http://127.0.0.1:4000/v1/chat/completions \
     ]
   }'
 ```
+
+Anthropic 兼容调用：
+
+```bash
+curl http://127.0.0.1:4000/v1/messages \
+  -H "x-api-key: sk-demo" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "max_tokens": 512,
+    "messages": [
+      {"role": "user", "content": "你好"}
+    ]
+  }'
+```
+
+这个接口会把 Anthropic 风格的 `messages` 请求转换成 OpenAI 风格的 chat completion，再把响应转换回 Anthropic 风格。
+
+Anthropic `count_tokens`：
+
+```bash
+curl http://127.0.0.1:4000/v1/messages/count_tokens \
+  -H "x-api-key: sk-demo" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o-mini",
+    "messages": [
+      {"role": "user", "content": "你好"}
+    ]
+  }'
+```
+
+如果你是给 Claude Code 或其他 Anthropic SDK 用，推荐两种接法：
+
+- 直接把基地址指到网关根路径，用 `/v1/messages`
+- 或者把基地址指到带命名空间的 `/anthropic`，走 `/anthropic/v1/messages`
+
+当前 `count_tokens` 是本地估算实现，主要目的是兼容 Anthropic 客户端调用流程，不依赖上游 provider 原生支持。
 
 ## 后续你可以继续加什么
 
