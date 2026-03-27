@@ -18,6 +18,7 @@ from app.routing import ModelRouter, ResolvedTarget
 
 HOP_BY_HOP_HEADERS = {
     "connection",
+    "content-encoding",
     "keep-alive",
     "proxy-authenticate",
     "proxy-authorization",
@@ -345,7 +346,8 @@ class OpenAIProxyService:
 
     async def _stream_upstream(self, upstream_response: httpx.Response):
         try:
-            async for chunk in upstream_response.aiter_raw():
+            # 用 aiter_bytes 让 httpx 处理上游压缩，避免把压缩头和解压后的内容混着转发。
+            async for chunk in upstream_response.aiter_bytes():
                 yield chunk
         except httpx.HTTPError as exc:
             error_payload = {
@@ -375,6 +377,8 @@ class OpenAIProxyService:
 
     def _build_upstream_headers(self, target: ResolvedTarget) -> dict[str, str]:
         headers = {
+            # 主动要求上游返回未压缩内容，减少代理层压缩/解压不一致的问题。
+            "accept-encoding": "identity",
             "content-type": "application/json",
             **target.provider.headers,
         }

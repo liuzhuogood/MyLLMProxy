@@ -1,5 +1,6 @@
 import json
 import time
+from gzip import compress
 
 import httpx
 import pytest
@@ -61,6 +62,7 @@ async def test_round_robin_switches_provider() -> None:
 
     async def handler(request: httpx.Request) -> httpx.Response:
         seen_hosts.append(request.url.host)
+        assert request.headers["accept-encoding"] == "identity"
         assert request.headers["authorization"] == (
             "Bearer provider-key-1" if request.url.host == "provider-1.example.com" else "Bearer provider-key-2"
         )
@@ -160,6 +162,41 @@ async def test_route_api_key_is_required() -> None:
             )
 
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_strip_content_encoding_from_downstream_response() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = {"id": "chatcmpl-test", "object": "chat.completion", "model": "upstream-a", "choices": []}
+        return httpx.Response(
+            200,
+            headers={
+                "content-type": "application/json",
+                "content-encoding": "gzip",
+            },
+            content=compress(json.dumps(payload).encode("utf-8")),
+        )
+
+    upstream_transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=upstream_transport) as upstream_client:
+        app = create_app(config=build_config(), http_client=upstream_client)
+        downstream_transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=downstream_transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"Authorization": "Bearer route-secret"},
+                json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+
+    assert response.status_code == 200
+    assert "content-encoding" not in response.headers
+    assert response.json()["model"] == "demo-model"
 
 
 @pytest.mark.asyncio
