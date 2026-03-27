@@ -1,4 +1,5 @@
 import json
+import time
 
 import httpx
 import pytest
@@ -159,3 +160,61 @@ async def test_route_api_key_is_required() -> None:
             )
 
     assert response.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_reload_config_when_file_changes(tmp_path) -> None:
+    config_path = tmp_path / "providers.yaml"
+    config_path.write_text(
+        json.dumps(
+            {
+                "gateway": {"strategy": "round_robin", "timeout_seconds": 5},
+                "providers": [{"name": "p1", "base_url": "https://provider-1.example.com"}],
+                "routes": {
+                    "demo-model": {
+                        "targets": [{"provider": "p1", "upstream_model": "upstream-a"}]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("upstream should not be called")
+
+    upstream_transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=upstream_transport) as upstream_client:
+        app = create_app(config_path=config_path, http_client=upstream_client)
+        downstream_transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=downstream_transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get("/v1/models")
+            assert response.status_code == 200
+            assert [item["id"] for item in response.json()["data"]] == ["demo-model"]
+
+            time.sleep(0.01)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "gateway": {"strategy": "round_robin", "timeout_seconds": 5},
+                        "providers": [{"name": "p1", "base_url": "https://provider-1.example.com"}],
+                        "routes": {
+                            "demo-model": {
+                                "targets": [{"provider": "p1", "upstream_model": "upstream-a"}]
+                            },
+                            "demo-model-2": {
+                                "targets": [{"provider": "p1", "upstream_model": "upstream-b"}]
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            response = await client.get("/v1/models")
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["data"]] == ["demo-model", "demo-model-2"]

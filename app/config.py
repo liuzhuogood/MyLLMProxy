@@ -84,13 +84,18 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def load_runtime_config(path: str | os.PathLike[str] | None = None) -> RuntimeConfig:
+def resolve_config_path(path: str | os.PathLike[str] | None = None) -> Path:
     resolved_path = Path(path or os.getenv("MY_LLM_PROXY_CONFIG", "config/providers.yaml"))
     if not resolved_path.exists():
         raise FileNotFoundError(
             f"config file not found: {resolved_path}. "
             "Set MY_LLM_PROXY_CONFIG or create config/providers.yaml."
         )
+    return resolved_path
+
+
+def load_runtime_config(path: str | os.PathLike[str] | None = None) -> RuntimeConfig:
+    resolved_path = resolve_config_path(path)
 
     try:
         return RuntimeConfig.model_validate(_read_yaml(resolved_path))

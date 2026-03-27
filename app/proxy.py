@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -10,7 +12,7 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from app.config import RuntimeConfig
+from app.config import RuntimeConfig, load_runtime_config
 from app.routing import ModelRouter, ResolvedTarget
 
 HOP_BY_HOP_HEADERS = {
@@ -37,10 +39,38 @@ class OpenAIProxyService:
         config: RuntimeConfig,
         model_router: ModelRouter,
         http_client: httpx.AsyncClient,
+        config_path: str | Path | None = None,
     ) -> None:
         self._config = config
         self._model_router = model_router
         self._http_client = http_client
+        self._config_path = Path(config_path) if config_path else None
+        self._config_mtime_ns = self._read_config_mtime_ns()
+        self._reload_lock = threading.Lock()
+
+    def reload_config_if_needed(self) -> None:
+        if self._config_path is None:
+            return
+
+        current_mtime_ns = self._read_config_mtime_ns()
+        if current_mtime_ns is None or current_mtime_ns == self._config_mtime_ns:
+            return
+
+        with self._reload_lock:
+            current_mtime_ns = self._read_config_mtime_ns()
+            if current_mtime_ns is None or current_mtime_ns == self._config_mtime_ns:
+                return
+
+            try:
+                new_config = load_runtime_config(self._config_path)
+            except Exception as exc:
+                LOGGER.warning("配置文件重载失败 path=%s error=%s", self._config_path, exc)
+                return
+
+            self._config = new_config
+            self._model_router = ModelRouter(new_config)
+            self._config_mtime_ns = current_mtime_ns
+            LOGGER.info("检测到配置文件变更，已自动重载 path=%s", self._config_path)
 
     def list_models_payload(self) -> dict[str, Any]:
         return {
@@ -333,6 +363,11 @@ class OpenAIProxyService:
         if api_key:
             headers["authorization"] = f"Bearer {api_key}"
         return headers
+
+    def _read_config_mtime_ns(self) -> int | None:
+        if self._config_path is None or not self._config_path.exists():
+            return None
+        return self._config_path.stat().st_mtime_ns
 
     @staticmethod
     def _join_url(base_url: str, path: str) -> str:
