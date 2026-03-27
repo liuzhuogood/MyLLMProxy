@@ -7,6 +7,8 @@ from typing import Any
 
 import httpx
 
+DEFAULT_ANTHROPIC_MAX_TOKENS = 4096
+
 
 def anthropic_error_type(status_code: int) -> str:
     if status_code == 400:
@@ -63,9 +65,10 @@ def anthropic_to_openai_request(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(model, str) or not model:
         raise ValueError("field `model` is required and must be a string")
 
-    max_tokens = payload.get("max_tokens")
+    # Anthropic 官方接口要求 max_tokens，但为了兼容更多客户端，这里允许省略并给默认值。
+    max_tokens = payload.get("max_tokens", DEFAULT_ANTHROPIC_MAX_TOKENS)
     if not isinstance(max_tokens, int) or max_tokens < 1:
-        raise ValueError("field `max_tokens` is required and must be a positive integer")
+        raise ValueError("field `max_tokens` must be a positive integer")
 
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:

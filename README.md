@@ -117,6 +117,7 @@ curl http://127.0.0.1:4000/v1/messages \
 ```
 
 这个接口会把 Anthropic 风格的 `messages` 请求转换成 OpenAI 风格的 chat completion，再把响应转换回 Anthropic 风格。
+如果没有传 `max_tokens`，网关会默认补成 `4096`。
 
 Anthropic `count_tokens`：
 
@@ -147,3 +148,15 @@ curl http://127.0.0.1:4000/v1/messages/count_tokens \
 - 每个 provider 的并发限制
 - 调用日志、统计、熔断
 - 管理后台或者热更新配置
+
+
+curl https://llm.s5.5slive.com/anthropic/v1/messages \
+  -H "x-api-key: sk-liuzhuo" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm-4.7",
+    "messages": [
+      {"role": "user", "content": "你好"}
+    ]
+  }'

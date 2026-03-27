@@ -259,6 +259,52 @@ async def test_anthropic_messages_non_stream() -> None:
 
 
 @pytest.mark.asyncio
+async def test_anthropic_messages_default_max_tokens() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        assert payload["max_tokens"] == 4096
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "upstream-a",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "Hi"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 1},
+            },
+        )
+
+    upstream_transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=upstream_transport) as upstream_client:
+        app = create_app(config=build_config(), http_client=upstream_client)
+        downstream_transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=downstream_transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/anthropic/v1/messages",
+                headers={
+                    "x-api-key": "route-secret",
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+    assert response.status_code == 200
+    assert response.json()["content"][0]["text"] == "Hi"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_messages_stream() -> None:
     stream_body = (
         'data: {"id":"chatcmpl-test","choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}\n\n'
