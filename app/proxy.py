@@ -203,9 +203,10 @@ class OpenAIProxyService:
         model_alias = openai_payload["model"]
         stream = bool(openai_payload.get("stream", False))
         LOGGER.info(
-            "收到 Anthropic 请求 model=%s stream=%s body=%s",
+            "收到 Anthropic 请求 model=%s stream=%s headers=%s body=%s",
             model_alias,
             stream,
+            self._sanitize_log_headers(request_headers or {}),
             self._dump_json(payload),
         )
 
@@ -435,10 +436,23 @@ class OpenAIProxyService:
             if upstream_response.status_code in RETRYABLE_STATUS_CODES:
                 body = await upstream_response.aread()
                 await upstream_response.aclose()
+                LOGGER.warning(
+                    "Anthropic 上游可重试失败 provider=%s status=%s elapsed_ms=%s body=%s",
+                    target.provider.name,
+                    upstream_response.status_code,
+                    self._elapsed_ms(started_at),
+                    self._truncate_text(body.decode("utf-8", "ignore")),
+                )
                 raise UpstreamRetryableError(
                     f"retryable status {upstream_response.status_code}: {body.decode('utf-8', 'ignore')}"
                 )
             if upstream_response.status_code >= 400:
+                LOGGER.warning(
+                    "Anthropic 上游返回错误 provider=%s status=%s elapsed_ms=%s",
+                    target.provider.name,
+                    upstream_response.status_code,
+                    self._elapsed_ms(started_at),
+                )
                 return await self._build_anthropic_error_response(upstream_response)
 
             LOGGER.info(
@@ -467,10 +481,24 @@ class OpenAIProxyService:
             raise UpstreamRetryableError(str(exc)) from exc
 
         if upstream_response.status_code in RETRYABLE_STATUS_CODES:
+            LOGGER.warning(
+                "Anthropic 上游可重试失败 provider=%s status=%s elapsed_ms=%s body=%s",
+                target.provider.name,
+                upstream_response.status_code,
+                self._elapsed_ms(started_at),
+                self._truncate_text(upstream_response.text),
+            )
             raise UpstreamRetryableError(
                 f"retryable status {upstream_response.status_code}: {upstream_response.text}"
             )
         if upstream_response.status_code >= 400:
+            LOGGER.warning(
+                "Anthropic 上游返回错误 provider=%s status=%s elapsed_ms=%s body=%s",
+                target.provider.name,
+                upstream_response.status_code,
+                self._elapsed_ms(started_at),
+                self._truncate_text(upstream_response.text),
+            )
             return await self._build_anthropic_error_response(upstream_response)
 
         data = openai_to_anthropic_response(upstream_response.json(), response_model_alias)
@@ -510,6 +538,12 @@ class OpenAIProxyService:
         await upstream_response.aclose()
 
         message = body.decode("utf-8", "ignore")
+        LOGGER.warning(
+            "Anthropic 错误响应 status=%s headers=%s body=%s",
+            upstream_response.status_code,
+            self._sanitize_log_headers(dict(upstream_response.headers)),
+            self._truncate_text(message),
+        )
         content_type = upstream_response.headers.get("content-type", "")
         if "application/json" in content_type:
             try:
@@ -630,6 +664,10 @@ class OpenAIProxyService:
             sanitized["authorization"] = "***"
         if "Authorization" in sanitized:
             sanitized["Authorization"] = "***"
+        if "x-api-key" in sanitized:
+            sanitized["x-api-key"] = "***"
+        if "X-Api-Key" in sanitized:
+            sanitized["X-Api-Key"] = "***"
         return sanitized
 
     @staticmethod
