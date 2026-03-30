@@ -22,9 +22,18 @@ class ProviderConfig(BaseModel):
     name: str
     base_url: str
     api_key: str | None = None
+    protocol: str = "openai"
     chat_path: str = "/v1/chat/completions"
     models_path: str = "/v1/models"
     headers: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_protocol(self) -> "ProviderConfig":
+        protocol = self.protocol.lower()
+        if protocol not in {"openai", "anthropic"}:
+            raise ValueError("protocol must be either 'openai' or 'anthropic'")
+        self.protocol = protocol
+        return self
 
 
 class TargetConfig(BaseModel):

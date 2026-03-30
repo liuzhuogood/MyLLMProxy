@@ -38,6 +38,29 @@ def build_config() -> RuntimeConfig:
     )
 
 
+def build_anthropic_upstream_config() -> RuntimeConfig:
+    return RuntimeConfig.model_validate(
+        {
+            "gateway": {"strategy": "round_robin", "timeout_seconds": 5},
+            "providers": [
+                {
+                    "name": "p1",
+                    "base_url": "https://provider-1.example.com",
+                    "api_key": "provider-key-1",
+                    "protocol": "anthropic",
+                    "chat_path": "/v1/messages",
+                }
+            ],
+            "routes": {
+                "demo-model": {
+                    "api_key": "route-secret",
+                    "targets": [{"provider": "p1", "upstream_model": "upstream-a"}],
+                }
+            },
+        }
+    )
+
+
 @pytest.mark.asyncio
 async def test_list_models_returns_alias() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -203,8 +226,8 @@ async def test_strip_content_encoding_from_downstream_response() -> None:
 async def test_anthropic_messages_non_stream() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))
-        assert request.headers["anthropic-version"] == "2023-06-01"
-        assert request.headers["anthropic-beta"] == "tools-2024-04-04"
+        assert "anthropic-version" not in request.headers
+        assert "anthropic-beta" not in request.headers
         assert payload["model"] == "upstream-a"
         assert payload["max_tokens"] == 128
         assert payload["messages"][0] == {"role": "system", "content": "You are helpful."}
@@ -259,6 +282,64 @@ async def test_anthropic_messages_non_stream() -> None:
 
 
 @pytest.mark.asyncio
+async def test_anthropic_messages_direct_passthrough_for_anthropic_provider() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        assert request.url.path == "/v1/messages"
+        assert request.headers["x-api-key"] == "provider-key-1"
+        assert request.headers["anthropic-version"] == "2023-06-01"
+        assert request.headers["anthropic-beta"] == "tools-2024-04-04"
+        assert "authorization" not in request.headers
+        assert payload == {
+            "model": "upstream-a",
+            "system": "You are helpful.",
+            "max_tokens": 128,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": False,
+        }
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Hi there"}],
+                "model": "upstream-a",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 12, "output_tokens": 5},
+            },
+        )
+
+    upstream_transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=upstream_transport) as upstream_client:
+        app = create_app(config=build_anthropic_upstream_config(), http_client=upstream_client)
+        downstream_transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=downstream_transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/v1/messages",
+                headers={
+                    "x-api-key": "route-secret",
+                    "anthropic-version": "2023-06-01",
+                    "anthropic-beta": "tools-2024-04-04",
+                },
+                json={
+                    "model": "demo-model",
+                    "system": "You are helpful.",
+                    "max_tokens": 128,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "demo-model"
+    assert response.json()["content"][0]["text"] == "Hi there"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_messages_default_max_tokens() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content.decode("utf-8"))
@@ -302,6 +383,145 @@ async def test_anthropic_messages_default_max_tokens() -> None:
 
     assert response.status_code == 200
     assert response.json()["content"][0]["text"] == "Hi"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_direct_passthrough_adds_default_headers_and_max_tokens() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        assert request.headers["x-api-key"] == "provider-key-1"
+        assert request.headers["anthropic-version"] == "2023-06-01"
+        assert "anthropic-beta" not in request.headers
+        assert payload["max_tokens"] == 4096
+        assert payload["messages"] == [{"role": "user", "content": "Hello"}]
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Hi"}],
+                "model": "upstream-a",
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {"input_tokens": 4, "output_tokens": 1},
+            },
+        )
+
+    upstream_transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=upstream_transport) as upstream_client:
+        app = create_app(config=build_anthropic_upstream_config(), http_client=upstream_client)
+        downstream_transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=downstream_transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/anthropic/v1/messages",
+                headers={"x-api-key": "route-secret"},
+                json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+    assert response.status_code == 200
+    assert response.json()["content"][0]["text"] == "Hi"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_does_not_forward_client_host_header() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "provider-1.example.com"
+        assert request.headers["host"] == "provider-1.example.com"
+        assert request.headers["host"] != "llm.s5.5slive.com"
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "model": "upstream-a",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "Hi"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 1},
+            },
+        )
+
+    upstream_transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=upstream_transport) as upstream_client:
+        app = create_app(config=build_config(), http_client=upstream_client)
+        downstream_transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=downstream_transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/anthropic/v1/messages",
+                headers={
+                    "host": "llm.s5.5slive.com",
+                    "x-api-key": "route-secret",
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+    assert response.status_code == 200
+    assert response.json()["content"][0]["text"] == "Hi"
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_stream_passthrough_for_anthropic_provider() -> None:
+    stream_body = (
+        'event: message_start\n'
+        'data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"upstream-a","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}\n\n'
+        'event: content_block_start\n'
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+        'event: content_block_delta\n'
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}\n\n'
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["x-api-key"] == "provider-key-1"
+        assert request.headers["anthropic-version"] == "2023-06-01"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=stream_body.encode("utf-8"),
+        )
+
+    upstream_transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=upstream_transport) as upstream_client:
+        app = create_app(config=build_anthropic_upstream_config(), http_client=upstream_client)
+        downstream_transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=downstream_transport,
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/v1/messages",
+                headers={
+                    "x-api-key": "route-secret",
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": "demo-model",
+                    "max_tokens": 64,
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                },
+            )
+
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+    assert response.text == stream_body
 
 
 @pytest.mark.asyncio

@@ -60,6 +60,26 @@ def anthropic_count_tokens_payload(payload: dict[str, Any]) -> dict[str, int]:
     return {"input_tokens": estimated}
 
 
+def normalize_anthropic_request(payload: dict[str, Any]) -> dict[str, Any]:
+    model = payload.get("model")
+    if not isinstance(model, str) or not model:
+        raise ValueError("field `model` is required and must be a string")
+
+    max_tokens = payload.get("max_tokens", DEFAULT_ANTHROPIC_MAX_TOKENS)
+    if not isinstance(max_tokens, int) or max_tokens < 1:
+        raise ValueError("field `max_tokens` must be a positive integer")
+
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise ValueError("field `messages` is required and must be a non-empty list")
+
+    request = dict(payload)
+    request["model"] = model
+    request["max_tokens"] = max_tokens
+    request["stream"] = bool(payload.get("stream", False))
+    return request
+
+
 def anthropic_to_openai_request(payload: dict[str, Any]) -> dict[str, Any]:
     model = payload.get("model")
     if not isinstance(model, str) or not model:
@@ -91,18 +111,25 @@ def anthropic_to_openai_request(payload: dict[str, Any]) -> dict[str, Any]:
         "stream": bool(payload.get("stream", False)),
     }
 
-    for field in ("temperature", "top_p", "metadata"):
+    # 只透传最常见、兼容性较好的 OpenAI 字段，避免上游 OpenAI 兼容接口因扩展参数报 400。
+    for field in ("temperature", "top_p"):
         if field in payload:
             request[field] = payload[field]
 
     if "stop_sequences" in payload:
         request["stop"] = payload["stop_sequences"]
 
-    if "tools" in payload:
-        request["tools"] = [_anthropic_tool_to_openai(tool) for tool in payload["tools"]]
+    tools = payload.get("tools")
+    if isinstance(tools, list) and tools:
+        request["tools"] = [_anthropic_tool_to_openai(tool) for tool in tools]
 
     if "tool_choice" in payload:
         request["tool_choice"] = _anthropic_tool_choice_to_openai(payload["tool_choice"])
+
+    output_config = payload.get("output_config")
+    response_format = _anthropic_output_config_to_openai(output_config)
+    if response_format is not None:
+        request["response_format"] = response_format
 
     return request
 
@@ -434,7 +461,7 @@ def _blocks_to_text(blocks: list[dict[str, Any]]) -> str:
         if block.get("type") != "text":
             raise ValueError("only text blocks are supported in this field")
         text_parts.append(block.get("text", ""))
-    return "".join(text_parts)
+    return "\n\n".join(part for part in text_parts if part)
 
 
 def _anthropic_message_id(raw_id: Any) -> str:
@@ -461,6 +488,29 @@ def _map_finish_reason(finish_reason: Any, content: list[dict[str, Any]]) -> str
 
 def _sse_event(event: str, data: dict[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+
+
+def _anthropic_output_config_to_openai(output_config: Any) -> dict[str, Any] | None:
+    if not isinstance(output_config, dict):
+        return None
+
+    format_config = output_config.get("format")
+    if not isinstance(format_config, dict):
+        return None
+
+    if format_config.get("type") == "json_schema" and isinstance(format_config.get("schema"), dict):
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "anthropic_output",
+                "schema": format_config["schema"],
+            },
+        }
+
+    if format_config.get("type") == "json_object":
+        return {"type": "json_object"}
+
+    return None
 
 
 def _estimate_tokens(data: Any) -> int:

@@ -44,10 +44,18 @@ providers:
   - name: openai-primary
     base_url: https://api.openai.com
     api_key: sk-provider-1
+    protocol: openai
 
   - name: openai-backup
     base_url: https://api.openai.com
     api_key: sk-provider-2
+    protocol: openai
+
+  - name: anthropic-primary
+    base_url: https://api.anthropic.com
+    api_key: sk-ant-provider-1
+    protocol: anthropic
+    chat_path: /v1/messages
 
 routes:
   gpt-4o-mini:
@@ -67,6 +75,11 @@ routes:
 - 实际会轮询打到 `openai-primary` 和 `openai-backup`
 - 请求体里的 `model` 会被改成对应上游的 `upstream_model`
 - 转发到上游时，会自动带上 provider 自己的 `api_key`
+
+`providers[].protocol` 用来声明上游说的是哪套接口协议：
+
+- `openai`：默认值。`/v1/messages` 会先转成 OpenAI `chat/completions` 再发给上游
+- `anthropic`：`/v1/messages` 会保留 Anthropic 请求体直接转发到上游，同时自动带 `x-api-key` 和 `anthropic-version`
 
 ## 运行
 
@@ -119,6 +132,8 @@ curl http://127.0.0.1:4000/v1/messages \
 这个接口会把 Anthropic 风格的 `messages` 请求转换成 OpenAI 风格的 chat completion，再把响应转换回 Anthropic 风格。
 如果没有传 `max_tokens`，网关会默认补成 `4096`。
 
+如果路由目标 provider 配的是 `protocol: anthropic`，则不会做这层格式转换，而是直接把 Anthropic 请求发到上游的 `chat_path`，通常应配置为 `/v1/messages`。
+
 Anthropic `count_tokens`：
 
 ```bash
@@ -152,7 +167,7 @@ curl http://127.0.0.1:4000/v1/messages/count_tokens \
 
 curl https://llm.s5.5slive.com/anthropic/v1/messages \
   -H "x-api-key: sk-liuzhuo" \
-  -H "anthropic-version: 2023-06-01" \
+  -H "max-tokens: 1000" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "glm-4.7",
@@ -160,3 +175,32 @@ curl https://llm.s5.5slive.com/anthropic/v1/messages \
       {"role": "user", "content": "你好"}
     ]
   }'
+
+
+export ANTHROPIC_BASE_URL="https://llm.s5.5slive.com/anthropic" 
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000
+export ANTHROPIC_AUTH_TOKEN="sk-liuzhuo" 
+export ANTHROPIC_DEFAULT_OPUS_MODEL="a-glm-4.7" 
+export ANTHROPIC_DEFAULT_SONNET_MODEL="a-glm-4.7" 
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="a-glm-4.7" 
+export ANTHROPIC_MODEL="a-glm-4.7"
+/Users/liuzhuo/.claude/local/claude
+
+
+2026-03-27 17:45:35,663 [INFO] my_llm_proxy - 开始 Anthropic 转发 model=a-glm-4.7 provider=gs_a upstream_model=glm-4.7 
+url=https://open.bigmodel.cn/api/anthropic 
+headers={'accept-encoding': 'identity', 'content-type': 'application/json', 
+'anthropic-version': '2023-06-01', 'anthropic-beta': 'claude-code-20250219,interleaved-thinking-2025-05-14,
+context-management-2025-06-27,prompt-caching-scope-2026-01-05,effort-2025-11-24', 'authorization': '***'} 
+body={"model": "glm-4.7", "messages": [{"role": "system", "content": "x-anthropic-billing-header: cc_version=2.1.85.351; 
+cc_entrypoint=cli; cch=00000;You are Claude Code, Anthropic'
+s official CLI for Claude.\nYou are an interactive agent that help
+s users with software engineering tasks. Use the instructions below and the 
+tools available to you to assist the user.\n\nIMPORTANT: Assist with authorized se
+curity testing, defensive security, CTF challenges, and educational contexts. Refuse req
+uests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or 
+detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential
+testing, exploit development) require clear authorization context: pentesting engagements, CTF co
+mpetitions, security research, or defensive use cases.\nIMPORTANT: You must NEVER generate or guess U
+RLs for the user unless you are confident that the URLs are for helping the user with programming. You ma
+y use URLs provided by the user in their messages or local files.\n\n# System\n - All text you output outside of tool use is displayed to the user. Output text to communicate with the user. You can use Github-flavored markdown for formatting, and will be rendered in a monospace font using the CommonMark specification.\n - Tools are executed in a user-selected permission mode. When you attempt to call a tool that is not automatically allowed by the user's permission mode or permission settings, the user will be prompted ...(truncated)

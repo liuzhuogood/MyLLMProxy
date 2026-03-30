@@ -18,6 +18,7 @@ from app.anthropic import (
     anthropic_error_payload,
     anthropic_model_payload,
     anthropic_models_payload,
+    normalize_anthropic_request,
     anthropic_to_openai_request,
     anthropic_stream_from_openai,
     openai_to_anthropic_response,
@@ -196,12 +197,12 @@ class OpenAIProxyService:
         request_headers: dict[str, str] | None = None,
     ) -> Response:
         try:
-            openai_payload = anthropic_to_openai_request(payload)
+            validated_payload = normalize_anthropic_request(payload)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-        model_alias = openai_payload["model"]
-        stream = bool(openai_payload.get("stream", False))
+        model_alias = validated_payload["model"]
+        stream = bool(validated_payload.get("stream", False))
         LOGGER.info(
             "收到 Anthropic 请求 model=%s stream=%s headers=%s body=%s",
             model_alias,
@@ -220,8 +221,13 @@ class OpenAIProxyService:
 
         errors: list[str] = []
         for target in candidates:
-            upstream_payload = dict(openai_payload)
-            upstream_payload["model"] = target.upstream_model
+            upstream_protocol = target.provider.protocol.lower()
+            if upstream_protocol == "anthropic":
+                upstream_payload = dict(validated_payload)
+                upstream_payload["model"] = target.upstream_model
+            else:
+                upstream_payload = anthropic_to_openai_request(validated_payload)
+                upstream_payload["model"] = target.upstream_model
             try:
                 return await self._dispatch_anthropic_messages(
                     target=target,
@@ -405,7 +411,13 @@ class OpenAIProxyService:
         stream: bool,
         request_headers: dict[str, str] | None = None,
     ) -> Response:
-        headers = self._build_upstream_headers(target, self._extract_anthropic_passthrough_headers(request_headers))
+        if target.provider.protocol.lower() == "anthropic":
+            headers = self._build_upstream_headers(
+                target,
+                self._extract_anthropic_passthrough_headers(request_headers),
+            )
+        else:
+            headers = self._build_upstream_headers(target)
         url = self._join_url(target.provider.base_url, target.provider.chat_path)
         timeout = self._config.gateway.timeout_seconds
         started_at = time.perf_counter()
@@ -461,6 +473,14 @@ class OpenAIProxyService:
                 upstream_response.status_code,
                 self._elapsed_ms(started_at),
             )
+            if target.provider.protocol.lower() == "anthropic":
+                return StreamingResponse(
+                    self._stream_upstream(upstream_response),
+                    status_code=upstream_response.status_code,
+                    headers=self._sanitize_response_headers(upstream_response.headers),
+                    media_type=upstream_response.headers.get("content-type", "text/event-stream"),
+                    background=BackgroundTask(upstream_response.aclose),
+                )
             return StreamingResponse(
                 anthropic_stream_from_openai(upstream_response, response_model_alias),
                 status_code=upstream_response.status_code,
@@ -501,7 +521,12 @@ class OpenAIProxyService:
             )
             return await self._build_anthropic_error_response(upstream_response)
 
-        data = openai_to_anthropic_response(upstream_response.json(), response_model_alias)
+        data = upstream_response.json()
+        if target.provider.protocol.lower() == "anthropic":
+            if isinstance(data, dict) and "model" in data:
+                data["model"] = response_model_alias
+        else:
+            data = openai_to_anthropic_response(data, response_model_alias)
         LOGGER.info(
             "Anthropic 转发完成 provider=%s status=%s elapsed_ms=%s body=%s",
             target.provider.name,
@@ -606,7 +631,11 @@ class OpenAIProxyService:
             headers.update(extra_headers)
         api_key = target.provider.api_key
         if api_key:
-            headers["authorization"] = f"Bearer {api_key}"
+            if target.provider.protocol.lower() == "anthropic":
+                if "x-api-key" not in {key.lower() for key in headers}:
+                    headers["x-api-key"] = api_key
+            elif "authorization" not in {key.lower() for key in headers}:
+                headers["authorization"] = f"Bearer {api_key}"
         return headers
 
     def _build_upstream_headers(
@@ -629,14 +658,16 @@ class OpenAIProxyService:
 
     @staticmethod
     def _extract_anthropic_passthrough_headers(request_headers: dict[str, str] | None) -> dict[str, str]:
+        passthrough: dict[str, str] = {"anthropic-version": "2023-06-01"}
         if not request_headers:
-            return {}
+            return passthrough
 
-        passthrough: dict[str, str] = {}
-        for header_name in ("anthropic-version", "anthropic-beta"):
-            value = request_headers.get(header_name)
-            if value:
-                passthrough[header_name] = value
+        for header_name, value in request_headers.items():
+            if not value:
+                continue
+            lowered_name = header_name.lower()
+            if lowered_name in {"anthropic-version", "anthropic-beta"}:
+                passthrough[lowered_name] = value
         return passthrough
 
     def _read_config_mtime_ns(self) -> int | None:

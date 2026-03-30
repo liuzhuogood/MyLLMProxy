@@ -14,9 +14,9 @@ from app.routing import ModelRouter
 
 
 def create_app(
-    config: RuntimeConfig | None = None,
-    config_path: str | Path | None = None,
-    http_client: httpx.AsyncClient | None = None,
+        config: RuntimeConfig | None = None,
+        config_path: str | Path | None = None,
+        http_client: httpx.AsyncClient | None = None,
 ) -> FastAPI:
     resolved_config_path = None if config is not None else resolve_config_path(config_path)
     runtime_config = config or load_runtime_config(resolved_config_path)
@@ -109,6 +109,10 @@ def create_app(
             )
         proxy_service.validate_route_api_key(request, payload)
         return await proxy_service.proxy_chat_completions(payload)
+
+    @app.post("/v1/responses")
+    async def anthropic_messages(request: Request):
+        return await anthropic_messages(request)
 
     @app.post("/v1/messages")
     async def anthropic_messages(request: Request):
